@@ -19,7 +19,7 @@ Events :: event.Events
 Event :: event.Event
 EventSource :: event.EventSource
 //
-mainn :: proc() {
+mainh :: proc() {
 	addr := "127.0.0.1:3000"
 	fmt.println("Making poll")
 	p, ok := make_poll()

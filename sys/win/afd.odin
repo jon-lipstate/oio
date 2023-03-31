@@ -41,10 +41,12 @@ afd_poll :: proc(afd: ^Afd, info: ^AfdPollInfo, iosb: ^IO_STATUS_BLOCK, overlapp
 	)
 
 	if status == STATUS_PENDING {
+		fmt.println("afd_poll - pending")
 		return false
 	} else if status == STATUS_SUCCESS {
 		return true
 	} else {
+		fmt.println("afd_poll - error")
 		// Handle error cases
 		return false
 	}
@@ -123,8 +125,6 @@ KNOWN_EVENTS := PollFlags{
 	.POLL_CONNECT_FAIL,
 }
 
-// sAFD_OBJ_NAME := utf16.encode_string()
-
 UNICODE_STRING :: struct {
 	Length:        u16, // USHORT
 	MaximumLength: u16, // USHORT
@@ -144,9 +144,9 @@ AFD_HELPER_NAME: [15]u16 = {
 	u16('f'),
 	u16('d'),
 	u16('\\'),
-	u16('M'),
-	u16('i'),
-	u16('o'),
+	u16('O'),
+	u16('I'),
+	u16('O'),
 }
 AFD_OBJ_NAME := UNICODE_STRING {
 	Length        = u16(len(AFD_HELPER_NAME)) * size_of(u16),
