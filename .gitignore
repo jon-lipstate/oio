@@ -1,0 +1,8 @@
+*.py
+*.exe
+*.pdb
+*.rdbg
+*-ubyte
+gz/
+scratch*
+.vscode
