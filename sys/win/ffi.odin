@@ -31,11 +31,12 @@ foreign import kernel32 "system:Kernel32.lib"
 @(default_calling_convention = "stdcall")
 foreign kernel32 {
 	SetFileCompletionNotificationModes :: proc(FileHandle: HANDLE, Flags: u8) -> BOOL ---
-	CreateIoCompletionPort :: proc(file_handle: HANDLE, existing_completion_port: HANDLE, completion_key: ^c.ulong, n_of_concurrent_threads: DWORD) -> HANDLE ---
+	CreateIoCompletionPort :: proc(file_handle: HANDLE, existing_completion_port: HANDLE, completion_key: c.ulong, n_of_concurrent_threads: DWORD) -> HANDLE ---
 	// <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatusex>
 	GetQueuedCompletionStatusEx :: proc(CompletionPort: HANDLE, lpCompletionPortEntries: ^OVERLAPPED_ENTRY, ulCount: c.ulong, ulNumEntriesRemoved: ^c.ulong, dwMilliseconds: DWORD, fAlertable: BOOL) -> BOOL ---
 	// <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-postqueuedcompletionstatus>
 	PostQueuedCompletionStatus :: proc(CompletionPort: HANDLE, dwNumberOfBytesTransferred: DWORD, dwCompletionKey: c.ulong, lpOverlapped: ^OVERLAPPED) -> BOOL ---
+	CreateEventA :: proc(lpEventAttributes: rawptr, bManualReset: BOOL, bInitialState: BOOL, lpName: ^u16) -> HANDLE --- //LPSECURITY_ATTRIBUTES//LPCSTR
 }
 SECURITY_QUALITY_OF_SERVICE :: struct {
 	Length:              DWORD,
@@ -72,9 +73,9 @@ OBJECT_ATTRIBUTES :: struct {
 }
 
 //ntstatus.h
-STATUS_SUCCESS :: i32(0x00000000)
-STATUS_PENDING :: i32(0x00000103)
-STATUS_NOT_FOUND :: transmute(i32)u32(0xC0000225)
+STATUS_SUCCESS :: 0x00000000
+STATUS_PENDING :: 0x00000103
+STATUS_NOT_FOUND :: transmute(i32)u32(0xC0000225) // TODO: better way?
 
 foreign import ntdll_lib "system:ntdll.lib"
 @(default_calling_convention = "stdcall")
@@ -112,8 +113,21 @@ WSAOVERLAPPED :: struct {
 }
 WSAOVERLAPPED_COMPLETION_ROUTINE :: proc(dwError: DWORD, cbTransferred: DWORD, lpOverlapped: ^WSAOVERLAPPED, dwFlags: DWORD)
 
-SIO_BASE_HANDLE: i32 = 0x48000022
-SIO_BSP_HANDLE: i32 = 0x48000023
-SIO_BSP_HANDLE_POLL: i32 = 0x48000024
-SIO_BSP_HANDLE_SELECT: i32 = 0x48000025
-SOCKET_ERROR: i32 = -1
+SIO_BASE_HANDLE :: 0x48000022
+SIO_BSP_HANDLE :: 0x48000023
+SIO_BSP_HANDLE_POLL :: 0x48000024
+SIO_BSP_HANDLE_SELECT :: 0x48000025
+SOCKET_ERROR :: -1
+WSA_IO_PENDING :: windows.ERROR_IO_PENDING
+// #define WSA_IO_PENDING          (ERROR_IO_PENDING)
+// #define WSA_IO_INCOMPLETE       (ERROR_IO_INCOMPLETE)
+// #define WSA_INVALID_HANDLE      (ERROR_INVALID_HANDLE)
+// #define WSA_INVALID_PARAMETER   (ERROR_INVALID_PARAMETER)
+// #define WSA_NOT_ENOUGH_MEMORY   (ERROR_NOT_ENOUGH_MEMORY)
+// #define WSA_OPERATION_ABORTED   (ERROR_OPERATION_ABORTED)
+foreign import mswsock_lib "system:Mswsock.lib"
+@(default_calling_convention = "stdcall")
+foreign mswsock_lib {
+	//<https://learn.microsoft.com/en-us/windows/win32/api/mswsock/nf-mswsock-acceptex>
+	AcceptEx :: proc(sListenSocket: SOCKET, sAcceptSocket: SOCKET, lpOutputBuffer: rawptr, dwReceiveDataLength: DWORD, dwLocalAddressLength: DWORD, dwRemoteAddressLength: DWORD, lpdwBytesReceived: ^DWORD, lpOverlapped: ^OVERLAPPED) -> BOOL ---
+}

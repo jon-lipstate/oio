@@ -10,7 +10,7 @@ CompletionStatus :: struct {
 
 // The number of threads given corresponds to the level of concurrency allowed for threads associated with this port.
 new_completion_port :: proc(n_threads: u32) -> (port: CompletionPort, err: Errno) {
-	handle := CreateIoCompletionPort(INVALID_HANDLE_VALUE, nil, nil, n_threads)
+	handle := CreateIoCompletionPort(INVALID_HANDLE_VALUE, nil, 0, n_threads)
 	if handle == nil {
 		err = Errno(GetLastError())
 		return {}, err
@@ -22,7 +22,7 @@ new_completion_port :: proc(n_threads: u32) -> (port: CompletionPort, err: Errno
 }
 
 add_handle :: proc(port: ^CompletionPort, token: ^Token, afd: HANDLE) -> Errno {
-	handle := CreateIoCompletionPort(afd, port.handle, cast(^u32)token, 0)
+	handle := CreateIoCompletionPort(afd, port.handle, cast(u32)token^, 0) // todo:fix token stuff
 	if handle == nil {
 		return Errno(GetLastError())
 	}

@@ -19,7 +19,7 @@ Events :: event.Events
 Event :: event.Event
 EventSource :: event.EventSource
 //
-main :: proc() {
+mainn :: proc() {
 	addr := "127.0.0.1:3000"
 	fmt.println("Making poll")
 	p, ok := make_poll()
@@ -37,13 +37,13 @@ main :: proc() {
 	unique_token := Token(SERVER + 1)
 	fmt.println("Server Running at:", addr)
 	for {
-		// Max Wait Time: 100 ms
 		poll(&p, &events, time.Millisecond * 500)
 		//
 		for event in events.inner.events {
 			switch Token(event.data) {
 			case SERVER:
 				fmt.println("SERVER EVENT")
+			// net.accept_tcp()
 			// accept_tcp(listener)
 			// drop(connection)
 			// errors: break on would_block
