@@ -61,12 +61,13 @@ main :: proc() {
 	}
 	poll_info := AFD_POLL_INFO {
 		NumberOfHandles = 1,
-		Timeout         = 1_000_000, // 9223372036854775807,
+		Timeout         = 1000, // 9223372036854775807,
 		Handles         = &events,
 	}
 	iosb := win.IO_STATUS_BLOCK{}
 	iosb.Status = win.STATUS_PENDING
 	overlapped := win.OVERLAPPED{}
+	fmt.println("overlapped", overlapped)
 	fmt.println("IOCTL_AFD_POLL", IOCTL_AFD_POLL)
 	fmt.println(poll_info)
 	fmt.println(iosb.Status)
@@ -145,7 +146,6 @@ get_queued_completion_status_ex :: proc(port: HANDLE, count: int) -> Result([]OV
 	removed: u32 = 0
 	items := make([]OVERLAPPED_ENTRY, count)
 	entries := transmute([^]OVERLAPPED_ENTRY)raw_data(items)
-	// TODO: dont use EX version
 	ret := GetQueuedCompletionStatusEx(port, entries, u32(len(items)), &removed, INFINITE, false)
 	if ret == false {
 		return Errno(GetLastError())
