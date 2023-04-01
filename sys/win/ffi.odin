@@ -36,7 +36,7 @@ foreign kernel32 {
 	GetQueuedCompletionStatusEx :: proc(CompletionPort: HANDLE, lpCompletionPortEntries: ^OVERLAPPED_ENTRY, ulCount: c.ulong, ulNumEntriesRemoved: ^c.ulong, dwMilliseconds: DWORD, fAlertable: BOOL) -> BOOL ---
 	// <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-postqueuedcompletionstatus>
 	PostQueuedCompletionStatus :: proc(CompletionPort: HANDLE, dwNumberOfBytesTransferred: DWORD, dwCompletionKey: c.ulong, lpOverlapped: ^OVERLAPPED) -> BOOL ---
-	CreateEventA :: proc(lpEventAttributes: rawptr, bManualReset: BOOL, bInitialState: BOOL, lpName: ^u16) -> HANDLE --- //LPSECURITY_ATTRIBUTES//LPCSTR
+	CreateEventA :: proc(lpEventAttributes: rawptr, bManualReset: BOOL, bInitialState: BOOL, lpName: ^cstring) -> HANDLE --- //LPSECURITY_ATTRIBUTES//LPCSTR
 }
 SECURITY_QUALITY_OF_SERVICE :: struct {
 	Length:              DWORD,
@@ -90,13 +90,20 @@ foreign ntdll_lib {
 
 IO_STATUS_BLOCK :: struct #packed {
 	using _:     struct #raw_union {
-		Status:  NTSTATUS,
-		Pointer: rawptr,
+		Status:  NTSTATUS, // i32?
+		Pointer: rawptr, // padding
 	},
-	Information: uintptr, // ulongptr
+	Information: uint, // ULONG_PTR
 }
 IO_APC_ROUTINE :: proc(ApcContext: rawptr, IoStatusBlock: ^IO_STATUS_BLOCK, Reserved: c.ulong)
-
+// //The OVERLAPPED instance must survive as long as the I/O operation is in progress
+// sOVERLAPPED :: struct {
+// 	Internal:     ^c_ulong, // holds status: STATUS_PENDING (0x103)
+// 	InternalHigh: ^c_ulong, // #bytes xfer once op finish
+// 	Offset:       DWORD,
+// 	OffsetHigh:   DWORD,
+// 	hEvent:       HANDLE,
+// }
 ///minwinbase.h
 OVERLAPPED_ENTRY :: struct {
 	lpCompletionKey:            c.ulong,

@@ -54,23 +54,21 @@ main :: proc() {
 	// 3. Create AsyncFd
 	afd := afd_from_completion_port(port).(AsyncFd)
 	// 4. Try Polling
-	events := AfdHandleInfo {
-		handle = transmute(HANDLE)listener,
-		status = 0,
-		events = READER_FLAGS,
+	events := AFD_POLL_HANDLE_INFO {
+		Handle     = transmute(HANDLE)listener,
+		Status     = 0,
+		PollEvents = READER_FLAGS,
 	}
-
-	poll_info := AfdPollInfo {
-		n_handles = 1,
-		timeout   = 1000 * 1000, // 9223372036854775807,
-		handles   = &events,
+	poll_info := AFD_POLL_INFO {
+		NumberOfHandles = 1,
+		Timeout         = 1_000_000, // 9223372036854775807,
+		Handles         = &events,
 	}
 	iosb := win.IO_STATUS_BLOCK{}
 	iosb.Status = win.STATUS_PENDING
 	overlapped := win.OVERLAPPED{}
-	fmt.println(IOCTL_AFD_POLL)
+	fmt.println("IOCTL_AFD_POLL", IOCTL_AFD_POLL)
 	fmt.println(poll_info)
-	fmt.println(events)
 	fmt.println(iosb.Status)
 	status := win.NtDeviceIoControlFile(
 		afd,
@@ -84,10 +82,11 @@ main :: proc() {
 		&poll_info,
 		size_of(poll_info),
 	)
+	fmt.printf("status: 0x%X \n", transmute(u32)status)
 
 	if status != win.STATUS_PENDING {
 		raw_err := win.RtlNtStatusToDosError(status)
-		fmt.printf("Failed to poll AFD: %v", raw_err)
+		fmt.printf("Failed to poll AFD: 0x%X", u32(raw_err))
 		return
 	}
 	fmt.println("call get_queued_completion_status_ex")
@@ -103,16 +102,16 @@ main :: proc() {
 }
 ///
 // AFD_POLL_EVENTS struct
-AfdHandleInfo :: struct {
-	handle: HANDLE,
-	events: u32,
-	status: windows.NTSTATUS,
+AFD_POLL_HANDLE_INFO :: struct {
+	Handle:     HANDLE,
+	PollEvents: u32, // ULONG
+	Status:     i32, // NTSTATUS
 }
-AfdPollInfo :: struct {
-	timeout:   i64, // LARGE_INTEGER,
-	n_handles: u32, // const :: 1
-	exclusive: u32,
-	handles:   ^AfdHandleInfo,
+AFD_POLL_INFO :: struct {
+	Timeout:         i64, // LARGE_INTEGER,
+	NumberOfHandles: u32, // ulong
+	Unique:          bool, //BOOLEAN 
+	Handles:         ^AFD_POLL_HANDLE_INFO, //AFD_POLL_HANDLE_INFO Handles[1]
 }
 IOCTL_AFD_POLL :: 0x00012024
 //0001 1011 1001
@@ -146,6 +145,7 @@ get_queued_completion_status_ex :: proc(port: HANDLE, count: int) -> Result([]OV
 	removed: u32 = 0
 	items := make([]OVERLAPPED_ENTRY, count)
 	entries := transmute([^]OVERLAPPED_ENTRY)raw_data(items)
+	// TODO: dont use EX version
 	ret := GetQueuedCompletionStatusEx(port, entries, u32(len(items)), &removed, INFINITE, false)
 	if ret == false {
 		return Errno(GetLastError())
@@ -154,7 +154,7 @@ get_queued_completion_status_ex :: proc(port: HANDLE, count: int) -> Result([]OV
 
 	return new_items
 }
-///
+
 afd_from_completion_port :: proc(port: HANDLE) -> Result(AsyncFd, Errno) {
 	using win
 	asyncFd: HANDLE = INVALID_HANDLE_VALUE
@@ -187,7 +187,7 @@ afd_from_completion_port :: proc(port: HANDLE) -> Result(AsyncFd, Errno) {
 	if result == false {
 		return Errno(GetLastError())
 	}
-	// fmt.println("afd created")
+	fmt.println("afd created")
 	return asyncFd
 }
 
