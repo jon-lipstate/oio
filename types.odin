@@ -4,9 +4,10 @@ import "core:fmt"
 import "core:sync"
 import "core:thread"
 import "core:unicode/utf16"
-import "core:container/queue"
+// import "core:container/queue"
 import "core:runtime"
 import "./sys/win"
+import "./set"
 // External API:
 // epoll_create, epoll_create1, epoll_close, epoll_ctl, epoll_wait
 //
@@ -16,11 +17,14 @@ ERROR_ALREADY_EXISTS :: windows.ERROR_ALREADY_EXISTS
 INVALID_SOCKET :: windows.INVALID_SOCKET
 GetLastError :: windows.GetLastError
 SetLastError :: windows.SetLastError
+CloseHandle :: windows.CloseHandle
 WSAENOTSOCK :: windows.WSAENOTSOCK
 SOCKET_ERROR :: windows.SOCKET_ERROR
 HANDLE :: windows.HANDLE
 SOCKET :: windows.SOCKET
 INFINITE :: win.INFINITE
+STATUS_CANCELLED :: win.STATUS_CANCELLED
+
 Allocator_Error :: runtime.Allocator_Error
 //
 CreateIoCompletionPort :: win.CreateIoCompletionPort
@@ -29,29 +33,28 @@ Result :: union($Value: typeid, $Error: typeid) {
 	Value,
 	Error,
 }
-try_set :: #force_inline proc(the_map: $T/map[$K]$V, key: K, value: V) -> bool {
+try_set :: #force_inline proc(the_map: ^$T/map[$K]$V, key: K, value: V) -> bool {
 	if key in the_map {
 		return false
 	} else {
 		the_map[key] = value
+		return true
 	}
 }
 unreachable :: proc(s := "") -> ! {
 	panic(s)
 }
-//////////////////////////////////////////////////////////////////////////////////////
-Queue :: queue.Queue
-//Early return if already at back
-queue_move_to_end :: proc(q: Queue($T), v: T) {
-	if queue.peek_back(q) != v {return}
-
-	i := 0
-	for i = 0; i < len(q.data); i += 1 {
-		if v == q.data[i] {break}
+// Linear Search, from front
+index_of :: proc(list: []$T, item: T) -> int {
+	index := 0
+	for value in list {
+		if value == item {return index}
+		index += 1
 	}
-	ordered_remove(q.data, i)
-	queue.push_back(q, v)
+	return -1
 }
+//////////////////////////////////////////////////////////////////////////////////////
+Set :: set.Set
 ///
 OVERLAPPED_ENTRY :: win.OVERLAPPED_ENTRY
 Errno :: win.Errno
@@ -112,19 +115,19 @@ AFD_POLL_INFO :: struct {
 IOCTL_AFD_POLL :: 0x00012024
 
 //
-EPOLL_IN := 1 << 0
-EPOLL_PRI := 1 << 1
-EPOLL_OUT := 1 << 2
-EPOLL_ERR := 1 << 3
-EPOLL_HUP := 1 << 4
-EPOLL_RDNORM := 1 << 6
-EPOLL_RDBAND := 1 << 7
-EPOLL_WRNORM := 1 << 8
-EPOLL_WRBAND := 1 << 9
-EPOLL_MSG := 1 << 10
-EPOLL_RDHUP := 1 << 13
-EPOLL_ONESHOT := 1 << 31
-EPOLL_KNOWN_EVENTS :=
+EPOLL_IN: u32 = 1 << 0
+EPOLL_PRI: u32 = 1 << 1
+EPOLL_OUT: u32 = 1 << 2
+EPOLL_ERR: u32 = 1 << 3
+EPOLL_HUP: u32 = 1 << 4
+EPOLL_RDNORM: u32 = 1 << 6
+EPOLL_RDBAND: u32 = 1 << 7
+EPOLL_WRNORM: u32 = 1 << 8
+EPOLL_WRBAND: u32 = 1 << 9
+EPOLL_MSG: u32 = 1 << 10
+EPOLL_RDHUP: u32 = 1 << 13
+EPOLL_ONESHOT: u32 = 1 << 31
+EPOLL_KNOWN_EVENTS: u32 =
 	EPOLL_IN |
 	EPOLL_PRI |
 	EPOLL_OUT |
@@ -158,25 +161,22 @@ Epoll_Event :: struct {
 
 POLL_GROUP_MAX_GROUP_SIZE :: 32
 Poll_Group :: struct {
-	port_state:        ^Port_State,
-	afd_device_handle: HANDLE,
+	port_state: ^Port_State,
+	afd_device: HANDLE,
 	// Number of subscribers to this group, keep below max_size for perf
-	group_size:        int,
+	group_size: int,
 }
 
 PORT_MAX_ON_STACK_COMPLETIONS :: 256
 Port_State :: struct {
-	iocp:               IOCP,
-	sockets:            map[SOCKET]^Sock_State, // sock_tree
-	update_queue:       map[^Sock_State]struct {}, // this really wants to be a Set[T]
-	sock_deleted_queue: Queue(^Sock_State),
-	poll_group_queue:   Queue(^Poll_Group),
+	iocp:              IOCP,
+	sockets:           map[SOCKET]^Sock_State, // sock_tree
+	update_queue:      Set(^Sock_State),
+	delete_queue:      [dynamic]^Sock_State,
+	group_queue:       [dynamic]^Poll_Group,
 	//
-	lock:               sync.Mutex,
-	active_poll_count:  int,
-	//
-
-	// handle_tree_node:   Ts_Tree_Node,
+	lock:              sync.Mutex,
+	active_poll_count: int,
 }
 Sock_Poll_Status :: enum {
 	Idle = 0,
@@ -214,14 +214,14 @@ ws_global_init :: proc() {
 // nt_global_init :: proc() {
 // 	// ntdll = GetModuleHandleW(L"ntdll.dll")
 // }
-reflock__keyed_event: HANDLE
-@(init, private)
-reflock_global_init :: proc() {
-	using win
-	status := NtCreateKeyedEvent(&reflock__keyed_event, KEYEDEVENT_ALL_ACCESS, nil, 0)
-	assert(status != STATUS_SUCCESS)
-	err := Errno(RtlNtStatusToDosError(status))
-}
+// reflock__keyed_event: HANDLE
+// @(init, private)
+// reflock_global_init :: proc() {
+// 	using win
+// 	status := NtCreateKeyedEvent(&reflock__keyed_event, KEYEDEVENT_ALL_ACCESS, nil, 0)
+// 	assert(status != STATUS_SUCCESS)
+// 	err := Errno(RtlNtStatusToDosError(status))
+// }
 // epoll__handle_tree: Ts_Tree
 // @(init, private)
 // epoll_global_init :: proc() {

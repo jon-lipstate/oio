@@ -4,28 +4,21 @@ import "core:fmt"
 import "core:sync"
 import "core:thread"
 import "core:unicode/utf16"
-import "core:container/queue"
 import "core:math/bits"
 import "./sys/win"
-
+import "./set"
+main :: proc() {
+	fmt.println("running..")
+}
 ///
 IOCP :: HANDLE
-PORTS := map[IOCP]Port_State{}
+PORTS := map[IOCP]^Port_State{}
 /*
 Initializes a `Port_State` and `IOCP`, registers into `PORTS`, then returns `IOCP`
 */
 epoll_create :: proc(allocator := context.allocator) -> IOCP {
-	// port_new()
-	port_state := new(Port_State, allocator);assert(port_state != nil)
-	port_state^ = {}
-	iocp: IOCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nil, 0, 0)
-	port_state.iocp = iocp
-	port_state.update_queue = make(map[^Sock_State]int)
-	port_state.deleted_queue = make(Queue(Sock_State))
-	port_state.poll_group_queue = make(Queue(Poll_Group))
-	//Register the port-state
-	PORTS[iocp] = port_state
-
+	port_state, iocp := port_new(allocator)
+	PORTS[iocp] = port_state //Register
 	return iocp
 }
 
@@ -37,13 +30,13 @@ The interest set is the set of file descriptors that the epoll instance is monit
 ~~ Register in Mio (Handle + Token)
 */
 epoll_ctl :: proc(iocp: IOCP, op: CTL_Action, sock: SOCKET, ev: ^Epoll_Event) -> int {
-	port_state := &PORTS[iocp];assert(port_state != nil)
+	port_state := PORTS[iocp];assert(port_state != nil)
 	status := port_ctl(port_state, op, sock, ev)
 
 	if status < 0 {
 		//On Linux, EBADF takes priority over other errors. Mimic this behavior.
-		err := err_check_handle(iocp)
-		err = err_check_handle(cast(HANDLE)sock)
+		err := check_handle(iocp)
+		err = check_handle(cast(HANDLE)sock)
 		return -1
 	}
 	return STATUS_SUCCESS
@@ -59,11 +52,11 @@ If no events occur within the specified timeout, the function returns 0.
 */
 epoll_wait :: proc(iocp: IOCP, events: []Epoll_Event, timeout: int) -> int {
 	assert(len(events) > 0)
-	port_state := &PORTS[iocp]
+	port_state := PORTS[iocp]
 	num_events := port_wait(port_state, transmute([^]Epoll_Event)&events[0], len(events), timeout)
 	// todo: unref
 	if num_events < 0 {
-		// err: err_check_handle(ephnd)
+		// err: check_handle(ephnd)
 		return -1
 	}
 	return num_events
@@ -72,7 +65,7 @@ epoll_wait :: proc(iocp: IOCP, events: []Epoll_Event, timeout: int) -> int {
 The epoll_close function is responsible for closing the epoll instance and cleaning up its associated resources.
 */
 epoll_close :: proc(iocp: IOCP) -> Errno {
-	port_state := &PORTS[iocp];assert(port_state != nil) // ERROR_INVALID_PARAMETER
+	port_state := PORTS[iocp];assert(port_state != nil) // ERROR_INVALID_PARAMETER
 	delete_key(&PORTS, iocp)
 	err := port_close(port_state)
 	err = port_delete(port_state)
@@ -94,17 +87,17 @@ port_ctl :: proc(port_state: ^Port_State, op: CTL_Action, sock: SOCKET, ev: ^Epo
 		}
 		port_update_events_if_polling(port_state)
 	case .Mod:
-		sock_state: ^Sock_State = port_state.sockets[socket];assert(sock_state != nil)
+		sock_state: ^Sock_State = port_state.sockets[sock];assert(sock_state != nil)
 		if sock_set_event(port_state, sock_state, ev) < 0 {
 			return -1
 		}
 		port_update_events_if_polling(port_state)
 	case .Del:
-		sock_state: ^Sock_State = port_state.sockets[socket];assert(sock_state != nil)
+		sock_state: ^Sock_State = port_state.sockets[sock];assert(sock_state != nil)
 		sock_delete(port_state, sock_state)
 	case:
 		SetLastError(ERROR_INVALID_PARAMETER)
-		return ERRNO_MAPPINGS[ERROR_INVALID_PARAMETER]
+		return Errno(ERROR_INVALID_PARAMETER) //ERRNO_MAPPINGS[ERROR_INVALID_PARAMETER]
 	}
 	return STATUS_SUCCESS
 }
@@ -127,13 +120,12 @@ sock_new :: proc(port_state: ^Port_State, socket: SOCKET, allocator := context.a
 		poll_group_release(poll_group)
 		return nil
 	}
-	sock_state^ = {}
 	sock_state.base_socket = base_socket
 	sock_state.poll_group = poll_group
-	sock_state.parent = port_state
+	// sock_state.parent = port_state
 
 	// port_register_socket
-	if !try_set(port_state.sockets, socket, sock_state) {
+	if !try_set(&port_state.sockets, socket, sock_state) {
 		SetLastError(ERROR_ALREADY_EXISTS)
 		free(sock_state)
 		return nil
@@ -153,30 +145,39 @@ sock_set_event :: proc(port_state: ^Port_State, sock_state: ^Sock_State, ev: ^Ep
 
 	return STATUS_SUCCESS
 }
+// O(n) Linear Search
+// TODO: replace with `user_socket` on the `Sock_State`?
+get_user_socket :: proc(port_state: ^Port_State, sock_state: ^Sock_State) -> SOCKET {
+	for k, v in port_state.sockets {return k}
+	return INVALID_SOCKET
+}
+
 // Cancels a pending poll, removes from `sockets`, deletes, or puts on `delete_queue` if not `.Idle`
 sock_delete :: proc(port_state: ^Port_State, sock_state: ^Sock_State, force := false) -> int {
+	// TODO: get_user_socket can return invalid socket, improve this...
 	if !sock_state.delete_pending {
 		if sock_state.poll_status == .Pending {
 			sock_cancel_poll(sock_state)
 		}
-		delete_key(&port_state.sockets, sock_state) // take out of the main list
+		delete_key(&port_state.sockets, get_user_socket(port_state, sock_state)) // take out of the main list
 		sock_state.delete_pending = true
 	}
+	//
 	if (force || sock_state.poll_status == .Idle) {
-		delete_key(&port_state.sockets, sock_state)
+		delete_key(&port_state.sockets, get_user_socket(port_state, sock_state))
 		poll_group_release(sock_state.poll_group)
 		assert(sock_state != nil)
 		free(sock_state)
 	} else {
 		// May still be pending, catch it on the next pass
-		queue.push_back(port_state.sock_deleted_queue, sock_state)
+		append(&port_state.delete_queue, sock_state)
 	}
 	return STATUS_SUCCESS
 }
 // iterates all items in the queue, draining it. early returns if an update error occurs
 port_update_events :: proc(port_state: ^Port_State) -> int {
 	// Walk the queue, submitting new poll requests for every socket that needs it.
-	for sock_state, _ in &port_state.update_queue {
+	for sock_state in &port_state.update_queue.m {
 		if sock_update(port_state, sock_state) < 0 {
 			return -1
 		}
@@ -236,25 +237,28 @@ get_base_socket :: proc(socket: SOCKET) -> SOCKET {
 	}
 }
 // Checks for InvalidHandle, SetLastError if so. GetHandleInformation also
-err_check_handle :: proc(h: HANDLE) -> Errno {
+check_handle :: proc(h: HANDLE) -> Errno {
+	using win
+	/* GetHandleInformation() succeeds when passed INVALID_HANDLE_VALUE, so check
+   * for this condition explicitly. */
 	if h == INVALID_HANDLE_VALUE {
-		SetLastError(os.EBADF)
-		return os.EBADF
+		// SetLastError(os.EBADF)
+		return -1 //os.EBADF
 	}
 	flags: u32
-	if windows.GetHandleInformation(h, &flags) == false {
-		err_map_win_error()
-		return os.EINVAL
+	if GetHandleInformation(h, &flags) == false {
+		SetLastError(ERROR_INVALID_HANDLE) // todo: what to do about os errors?
+		return -1 //os.EINVAL
 	}
 	return 0
 }
 // Either gets existing poll_group, or makes a new one
 poll_group_acquire :: proc(port_state: ^Port_State, allocator := context.allocator) -> ^Poll_Group {
-	sync.guard(port_state.lock)
-	pgq := &port_state.poll_group_queue
+	sync.guard(&port_state.lock)
+	group_queue := &port_state.group_queue
 	// Check if there is an existing Poll_Group in the queue
-	if len(pgq) != 0 {
-		last_pg := queue.peek_back(pgq)
+	if len(group_queue) != 0 {
+		last_pg := group_queue[len(group_queue) - 1]
 		// If the existing Poll_Group has not reached the maximum group size, return it
 		if last_pg.group_size < POLL_GROUP_MAX_GROUP_SIZE {
 			last_pg.group_size += 1
@@ -265,29 +269,31 @@ poll_group_acquire :: proc(port_state: ^Port_State, allocator := context.allocat
 	new_pg, alloc_err := new(Poll_Group, allocator);assert(alloc_err == .None)
 	new_pg.port_state = port_state
 	new_pg.group_size = 1
-	queue.push_back(pgq, new_pg)
-	// not sure i understand the move_to_start bit in wepoll
-
+	append(group_queue, new_pg)
+	// TODO: not sure i understand the move_to_start bit in wepoll
 	return new_pg
 }
 // Decrements `poll_group.group_size`, moves `poll_group` to back of queue
 poll_group_release :: proc(poll_group: ^Poll_Group) {
-	pgq := &poll_group.port_state.poll_group_queue
+	group_queue := &poll_group.port_state.group_queue
 	poll_group.group_size -= 1
-	assert(poll_group.group_size < POLL_GROUP__MAX_GROUP_SIZE)
-
-	queue_move_to_end(pgq, poll_group)
+	assert(poll_group.group_size < POLL_GROUP_MAX_GROUP_SIZE)
+	idx := index_of(group_queue[:], poll_group);assert(idx >= 0)
+	if idx < len(group_queue) - 1 {
+		ordered_remove(group_queue, idx)
+		append(group_queue, poll_group)
+	}
 	// Poll groups are currently only freed when the epoll port is closed.
 }
 // early out, registers in `update_queue`
 port_request_socket_update :: proc(port_state: ^Port_State, sock_state: ^Sock_State) {
-	if sock_state in port_state.update_queue {return}
-	port_state.update_queue[sock_state] = {}
+	if set.contains(&port_state.update_queue, sock_state) {return}
+	set.add(&port_state.update_queue, sock_state)
 }
 // cancels the afd_poll, sets state to cancelled
 sock_cancel_poll :: proc(sock_state: ^Sock_State) -> int {
 	assert(sock_state.poll_status == .Pending)
-	if afd_cancel_poll(sock_state.poll_group.afd_device_handle, &sock_state.io_status_block) < 0 {
+	if afd_cancel_poll(sock_state.poll_group.afd_device, &sock_state.io_status_block) < 0 {
 		return -1
 	}
 	sock_state.poll_status = .Cancelled
@@ -296,7 +302,7 @@ sock_cancel_poll :: proc(sock_state: ^Sock_State) -> int {
 }
 // early out, removes from `update_queue` TODO: remove `port_state`, use parent ptr??
 cancel_socket_update :: proc(port_state: ^Port_State, sock_state: ^Sock_State) {
-	if sock_state not_in port_state.update_queue {return} else {delete_key(&port_state.update_queue, sock_state)}
+	if sock_state not_in port_state.update_queue.m {return} else {delete_key(&port_state.update_queue.m, sock_state)}
 }
 // Calls NtCancelIoFileEx, early out if already done or cancelled
 afd_cancel_poll :: proc(afd_device_handle: HANDLE, iosb: ^IO_STATUS_BLOCK) -> Errno {
@@ -320,31 +326,13 @@ afd_cancel_poll :: proc(afd_device_handle: HANDLE, iosb: ^IO_STATUS_BLOCK) -> Er
 ///////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////
-// map_win_error_to_errno :: proc(error: u32) -> Errno {
-// 	err, has := ERRNO_MAPPINGS[error]
-// 	if has {return err}
-// 	return os.EINVAL
-// }
-// err_map_win_error :: proc() -> Errno {
-// 	err := map_win_error_to_errno(GetLastError())
-// 	SetLastError(err)
-// 	return err
-// }
-// err_set_win_error :: proc(win_err: u32) -> Errno {
-// 	err := map_win_error_to_errno(win_err)
-// 	SetLastError(err)
-// 	return err
-// }
-
-afd_create_device_handle :: proc(iocp: HANDLE) -> Result(HANDLE, Errno) {
+// Creates `afd_device` & associates to `iocp`
+afd_create_device :: proc(iocp: IOCP) -> Result(HANDLE, Errno) {
 	using win
-	afd_device_handle: HANDLE
+	afd_device: HANDLE
 	iosb: IO_STATUS_BLOCK
-	status: i32 // NTSTATUS
-
-	// Call NtCreateFile
-	status = NtCreateFile(
-		&afd_device_handle,
+	status := NtCreateFile(
+		&afd_device,
 		SYNCHRONIZE,
 		&AFD_HELPER_ATTRIBUTES, // Global static str
 		&iosb,
@@ -361,14 +349,14 @@ afd_create_device_handle :: proc(iocp: HANDLE) -> Result(HANDLE, Errno) {
 		return Errno(err)
 	}
 	// associate handle
-	ih := CreateIoCompletionPort(afd_device_handle, iocp, 0, 0)
+	ih := CreateIoCompletionPort(afd_device, iocp, 0, 0)
 	if ih == nil {return -1}
 	// set async mode
-	if !SetFileCompletionNotificationModes(afd_device_handle, FILE_SKIP_SET_EVENT_ON_HANDLE) {
-		windows.CloseHandle(afd_device_handle)
+	if !SetFileCompletionNotificationModes(afd_device, FILE_SKIP_SET_EVENT_ON_HANDLE) {
+		windows.CloseHandle(afd_device)
 		return -1
 	}
-	return afd_device_handle
+	return afd_device
 }
 
 afd_poll :: proc(afd_device_handle: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO_STATUS_BLOCK) -> Errno {
@@ -402,26 +390,14 @@ afd_poll :: proc(afd_device_handle: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO
 
 //////////////////////////////////////////////
 
-////
-
-port_new :: proc(allocator := context.allocator) -> (state: ^Port_State, iocp: HANDLE) {
+port_new :: proc(allocator := context.allocator) -> (port_state: ^Port_State, iocp: IOCP) {
 	using win
-	port_state: ^Port_State = new(Port_State, allocator)
-	assert(port_state != nil)
-	// error : free(port_state)
-	port_state^ = {} // do i need?
-
-	iocp: HANDLE
+	port_state = new(Port_State, allocator);assert(port_state != nil)
 	iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nil, 0, 0)
-	assert(iocp != nil)
-
 	port_state.iocp = iocp
-	tree_init(&port_state.sock_tree)
-	fmt.println("todo: queue_init")
-	// queue_init(&port_state.sock_update_queue)
-	// queue_init(&port_state.sock_deleted_queue)
-	// queue_init(&port_state.poll_group_queue)
-	ts_tree_node_init(&port_state.handle_tree_node)
+	port_state.update_queue = set.init(^Sock_State, allocator)
+	port_state.delete_queue = make([dynamic]^Sock_State, allocator)
+	port_state.group_queue = make([dynamic]^Poll_Group, allocator)
 
 	return port_state, iocp
 }
@@ -429,20 +405,19 @@ port_new :: proc(allocator := context.allocator) -> (state: ^Port_State, iocp: H
 port_delete :: proc(port_state: ^Port_State) -> Errno {
 	// At this point the IOCP port should have been closed.
 	assert(port_state.iocp == nil)
-	assert(len(port_state.update_queue) == 0)
+	assert(set.is_empty(&port_state.update_queue))
 	assert(port_state.active_poll_count == 0)
 
-	for ss in &port_state.sock_deleted_queue {
+	for ss in &port_state.delete_queue {
 		sock_delete(port_state, ss, true)
 	}
 
-	for pg in &port_state.poll_group_queue {
+	for pg in &port_state.group_queue {
 		poll_group_delete(pg)
 	}
-
-	delete(port_state.update_queue)
-	delete(port_state.sock_deleted_queue)
-	delete(port_state.poll_group_queue)
+	set.destroy(&port_state.update_queue)
+	delete(port_state.delete_queue)
+	delete(port_state.group_queue)
 	free(port_state)
 
 	return STATUS_SUCCESS
@@ -456,34 +431,27 @@ port_close :: proc(port_state: ^Port_State) -> Errno {
 	assert(ok == true)
 	return STATUS_SUCCESS
 }
-
-poll_group__new :: proc(port_state: ^Port_State) -> ^Poll_Group {
-	iocp := port_get_iocp(port_state)
-	poll_group_queue := port_get_poll_group_queue(port_state)
-
-	poll_group := alloc(Poll_Group, size_of(Poll_Group))
-	if poll_group == nil {
-		return_set_error(nil, ERROR_NOT_ENOUGH_MEMORY)
-	}
-
-	memset(poll_group, 0, size_of(Poll_Group))
-
-	queue_node_init(&poll_group.queue_node)
+// Creates a `new(Poll_Group)` and an `afd_device`. Returns `nil` on failure
+poll_group_new :: proc(port_state: ^Port_State, allocator := context.allocator) -> ^Poll_Group {
+	iocp := port_state.iocp
+	poll_group, alloc_err := new(Poll_Group, allocator);assert(alloc_err == .None)
 	poll_group.port_state = port_state
+	poll_group.group_size = 1
 
-	if afd_create_device_handle(iocp, &poll_group.afd_device_handle) < 0 {
+	switch afd in afd_create_device(iocp) {
+	case (HANDLE):
+		poll_group.afd_device = afd
+	case (Errno):
 		free(poll_group)
 		return nil
 	}
-
-	queue_append(poll_group_queue, &poll_group.queue_node)
-
+	append(&port_state.group_queue, poll_group)
 	return poll_group
 }
-// CloseHandle(afd), free(self)
+// `CloseHandle(afd)`, `free(self)`
 poll_group_delete :: proc(poll_group: ^Poll_Group) {
 	assert(poll_group.group_size == 0)
-	CloseHandle(poll_group.afd_device_handle)
+	CloseHandle(poll_group.afd_device)
 	free(poll_group)
 }
 // executes the poll with wait
@@ -520,7 +488,7 @@ port_wait :: proc(port_state: ^Port_State, events: ^Epoll_Event, maxevents: int,
 		for {
 			now: u64
 
-			result = port_poll(port_state, events, iocp_events, u32(maxevents), gqcs_timeout)
+			result = port_poll(port_state, events, iocp_events, u32(maxevents), u32(gqcs_timeout)) // TODO: Shouldnt timout be i32?
 
 			if result != 0 {break}
 			if timeout < 0 {continue}
@@ -591,22 +559,22 @@ port_feed_events :: #force_inline proc(
 // Converts EPOLL_XX to AFD_POLL_XX Events
 epoll_events_into_afd_events :: proc(epoll_events: u32) -> (afd_events: u32) {
 	afd_events = AFD_POLL_LOCAL_CLOSE
-	if (epoll_events & (EPOLL_IN | EPOLL_RDNORM)) {
+	if epoll_events & (EPOLL_IN | EPOLL_RDNORM) > 0 {
 		afd_events |= AFD_POLL_RECEIVE | AFD_POLL_ACCEPT
 	}
-	if (epoll_events & (EPOLL_PRI | EPOLL_RDBAND)) {
+	if epoll_events & (EPOLL_PRI | EPOLL_RDBAND) > 0 {
 		afd_events |= AFD_POLL_RECEIVE_EXPEDITED
 	}
-	if (epoll_events & (EPOLL_OUT | EPOLL_WRNORM | EPOLL_WRBAND)) {
+	if epoll_events & (EPOLL_OUT | EPOLL_WRNORM | EPOLL_WRBAND) > 0 {
 		afd_events |= AFD_POLL_SEND
 	}
-	if (epoll_events & (EPOLL_IN | EPOLL_RDNORM | EPOLL_RDHUP)) {
+	if epoll_events & (EPOLL_IN | EPOLL_RDNORM | EPOLL_RDHUP) > 0 {
 		afd_events |= AFD_POLL_DISCONNECT
 	}
-	if (epoll_events & EPOLL_HUP) {
+	if epoll_events & EPOLL_HUP > 0 {
 		afd_events |= AFD_POLL_ABORT
 	}
-	if (epoll_events & EPOLL_ERR) {
+	if epoll_events & EPOLL_ERR > 0 {
 		afd_events |= AFD_POLL_CONNECT_FAIL
 	}
 	return afd_events
@@ -614,22 +582,22 @@ epoll_events_into_afd_events :: proc(epoll_events: u32) -> (afd_events: u32) {
 // Converts AFD_POLL_XX to EPOLL_XX Events
 afd_events_into_epoll_events :: proc(afd_events: u32) -> (epoll_events: u32) {
 	epoll_events = 0
-	if (afd_events & (AFD_POLL_RECEIVE | AFD_POLL_ACCEPT)) {
+	if afd_events & (AFD_POLL_RECEIVE | AFD_POLL_ACCEPT) > 0 {
 		epoll_events |= EPOLL_IN | EPOLL_RDNORM
 	}
-	if (afd_events & AFD_POLL_RECEIVE_EXPEDITED) {
+	if afd_events & AFD_POLL_RECEIVE_EXPEDITED > 0 {
 		epoll_events |= EPOLL_PRI | EPOLL_RDBAND
 	}
-	if (afd_events & AFD_POLL_SEND) {
+	if afd_events & AFD_POLL_SEND > 0 {
 		epoll_events |= EPOLL_OUT | EPOLL_WRNORM | EPOLL_WRBAND
 	}
-	if (afd_events & AFD_POLL_DISCONNECT) {
+	if afd_events & AFD_POLL_DISCONNECT > 0 {
 		epoll_events |= EPOLL_IN | EPOLL_RDNORM | EPOLL_RDHUP
 	}
-	if (afd_events & AFD_POLL_ABORT) {
+	if afd_events & AFD_POLL_ABORT > 0 {
 		epoll_events |= EPOLL_HUP
 	}
-	if (afd_events & AFD_POLL_CONNECT_FAIL) {
+	if afd_events & AFD_POLL_CONNECT_FAIL > 0 {
 		epoll_events |= EPOLL_IN | EPOLL_OUT | EPOLL_ERR | EPOLL_RDNORM | EPOLL_WRNORM | EPOLL_RDHUP
 	}
 	return epoll_events
@@ -653,14 +621,14 @@ sock_update :: proc(port_state: ^Port_State, sock_state: ^Sock_State) -> int {
         * it to return. For now, there's nothing that needs to be done. */
 	} else if (sock_state.poll_status == .Idle) {
 		/* No poll operation is pending; start one. */
-		sock_state.poll_info.Exclusive = false
+		sock_state.poll_info.Unique = false
 		sock_state.poll_info.NumberOfHandles = 1
-		sock_state.poll_info.Timeout.QuadPart = bits.I64_MAX
+		sock_state.poll_info.Timeout = bits.I64_MAX
 		sock_state.poll_info.Handles[0].Handle = HANDLE(sock_state.base_socket)
 		sock_state.poll_info.Handles[0].Status = 0
-		sock_state.poll_info.Handles[0].Events = epoll_events_into_afd_events(sock_state.user_events)
+		sock_state.poll_info.Handles[0].PollEvents = epoll_events_into_afd_events(sock_state.user_events)
 
-		if (afd_poll(sock_state.poll_group.afd_device_handle, &sock_state.poll_info, &sock_state.io_status_block) < 0) {
+		if (afd_poll(sock_state.poll_group.afd_device, &sock_state.poll_info, &sock_state.io_status_block) < 0) {
 			switch (GetLastError()) {
 			case ERROR_IO_PENDING:
 				/* Overlapped poll operation in progress; this is expected. */
@@ -695,19 +663,19 @@ sock_feed_event :: proc(port_state: ^Port_State, io_status_block: ^IO_STATUS_BLO
 	if sock_state.delete_pending {
 		/* Socket has been deleted earlier and can now be freed. */
 		return sock_delete(port_state, sock_state, false)
-	} else if io_status_block.Status == STATUS_CANCELLED {
+	} else if transmute(u32)io_status_block.Status == STATUS_CANCELLED {
 		/* The poll request was cancelled by CancelIoEx. */
 	} else if io_status_block.Status < 0 {
 		/* The overlapped request itself failed in an unexpected way. */
 		epoll_events = EPOLL_ERR
 	} else if poll_info.NumberOfHandles < 1 {
 		/* This poll operation succeeded but didn't report any socket events. */
-	} else if poll_info.Handles[0].Events & AFD_POLL_LOCAL_CLOSE != 0 {
+	} else if poll_info.Handles[0].PollEvents & AFD_POLL_LOCAL_CLOSE != 0 {
 		/* The poll operation reported that the socket was closed. */
 		return sock_delete(port_state, sock_state, false)
 	} else {
 		/* Events related to our socket were reported. */
-		epoll_events = afd_events_into_epoll_events(poll_info.Handles[0].Events)
+		epoll_events = afd_events_into_epoll_events(poll_info.Handles[0].PollEvents)
 	}
 	// re-register for next iteration
 	port_request_socket_update(port_state, sock_state)

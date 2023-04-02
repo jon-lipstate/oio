@@ -29,16 +29,22 @@ foreign ws2_32 {
 foreign import kernel32 "system:Kernel32.lib"
 @(default_calling_convention = "stdcall")
 foreign kernel32 {
+	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setfilecompletionnotificationmodes)
 	SetFileCompletionNotificationModes :: proc(FileHandle: HANDLE, Flags: u8) -> BOOL ---
+	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-createiocompletionport)
 	CreateIoCompletionPort :: proc(file_handle: HANDLE, existing_completion_port: HANDLE, completion_key: c.ulong, n_of_concurrent_threads: DWORD) -> HANDLE ---
-	// <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatusex>
+	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatusex)
 	GetQueuedCompletionStatusEx :: proc(CompletionPort: HANDLE, lpCompletionPortEntries: ^OVERLAPPED_ENTRY, ulCount: c.ulong, ulNumEntriesRemoved: ^c.ulong, dwMilliseconds: DWORD, fAlertable: BOOL) -> BOOL ---
-	// <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-postqueuedcompletionstatus>
+	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-postqueuedcompletionstatus)
 	PostQueuedCompletionStatus :: proc(CompletionPort: HANDLE, dwNumberOfBytesTransferred: DWORD, dwCompletionKey: c.ulong, lpOverlapped: ^OVERLAPPED) -> BOOL ---
+	//
 	CreateEventA :: proc(lpEventAttributes: rawptr, bManualReset: BOOL, bInitialState: BOOL, lpName: ^cstring) -> HANDLE --- //LPSECURITY_ATTRIBUTES//LPCSTR
+	//
 	GetTickCount64 :: proc() -> u64 ---
-	// <https://github.com/mic101/windows/blob/master/WRK-v1.2/base/ntos/ex/keyedevent.c>
+	// [MS-Docs](https://github.com/mic101/windows/blob/master/WRK-v1.2/base/ntos/ex/keyedevent.c)
 	NtCreateKeyedEvent :: proc(KeyedEventHandle: ^HANDLE, DesiredAccess: ACCESS_MASK, ObjectAttributes: OBJECT_ATTRIBUTES, Flags: u32) -> NTSTATUS ---
+	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-gethandleinformation)
+	GetHandleInformation :: proc(hObject: HANDLE, lpdwFlags: ^DWORD) -> BOOL ---
 }
 SECURITY_QUALITY_OF_SERVICE :: struct {
 	Length:              DWORD,
