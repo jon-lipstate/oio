@@ -28,13 +28,15 @@ main :: proc() {
 	evt.events = EPOLL_IN
 	evt.data.sock = sock
 	status := epoll_ctl(iocp, .Add, sock, evt)
-	i := 0
 	for {
 		fmt.print("Polling: ")
 		poll_result := epoll_wait(iocp, evts[:], 5000)
-		if poll_result == 0 {fmt.println("No Events")} else {fmt.println("Events!", evt.events, evt.data)}
-		i += 1
-		if i > 2 {break}
+		if poll_result == 0 {
+			fmt.println("No Events")
+		} else {
+			fmt.printf("Events!, %v, %v\n", evt.events, evt.data)
+			break
+		}
 	}
 	//
 	epoll_close(iocp)
