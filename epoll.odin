@@ -7,8 +7,40 @@ import "core:unicode/utf16"
 import "core:math/bits"
 import "./sys/win"
 import "./set"
+import "core:net"
 main :: proc() {
 	fmt.println("running..")
+	iocp := epoll_create()
+	//
+	addr := "127.0.0.1:3000"
+	ep, epok := net.parse_endpoint(addr)
+	assert(epok)
+	s, err := net.create_socket(.IP4, .TCP)
+	socket := s.(net.TCP_Socket)
+	sock := SOCKET(socket)
+	defer net.close(socket)
+	err = net.bind(socket, ep)
+	lerr := windows.listen(sock, i32(5))
+	assert(lerr != SOCKET_ERROR)
+	//
+	evts := [1]Epoll_Event{}
+	evt := &evts[0]
+	evt.events = EPOLL_IN
+	evt.data.sock = sock
+	status := epoll_ctl(iocp, .Add, sock, evt)
+	fmt.println("status", status)
+	fmt.println("evt", evt)
+	i := 0
+	for {
+		fmt.print("Polling: ")
+		poll_result := epoll_wait(iocp, evts[:], 5000)
+		if poll_result == 0 {fmt.println("No Events")} else {fmt.println("Events!", evt.events, evt.data)}
+		i += 1
+		if i > 2 {break}
+	}
+	//
+	epoll_close(iocp)
+	fmt.println("end")
 }
 ///
 IOCP :: HANDLE
@@ -21,7 +53,6 @@ epoll_create :: proc(allocator := context.allocator) -> IOCP {
 	PORTS[iocp] = port_state //Register
 	return iocp
 }
-
 /*
 The `epoll_ctl` function is responsible for managing the interest set of an epoll instance (represented by `iocp`).
 It is used to add, modify, or remove file descriptors from the interest set associated with the epoll instance.
@@ -41,14 +72,12 @@ epoll_ctl :: proc(iocp: IOCP, op: CTL_Action, sock: SOCKET, ev: ^Epoll_Event) ->
 	}
 	return STATUS_SUCCESS
 }
-
 /*
 `epoll_wait` is the actual polling proc. It waits for events to occur on the `afd`'s that have been added to the epoll instance using `epoll_ctl`.
 When an event occurs, `epoll_wait` fills the events array with the triggered events and returns the number of events.
 If no events occur within the specified timeout, the function returns 0.
 
 ~~ Select in Mio
-
 */
 epoll_wait :: proc(iocp: IOCP, events: []Epoll_Event, timeout: int) -> int {
 	assert(len(events) > 0)
@@ -72,12 +101,9 @@ epoll_close :: proc(iocp: IOCP) -> Errno {
 	return err
 }
 ///////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////
-
 // Add, Modify or Delete a target for a port
 port_ctl :: proc(port_state: ^Port_State, op: CTL_Action, sock: SOCKET, ev: ^Epoll_Event, allocator := context.allocator) -> Errno {
-	sync.guard(&port_state.lock)
+	// sync.guard(&port_state.lock)
 	switch op {
 	case .Add:
 		sock_state: ^Sock_State = sock_new(port_state, sock, allocator);assert(sock_state != nil)
@@ -128,6 +154,7 @@ sock_new :: proc(port_state: ^Port_State, socket: SOCKET, allocator := context.a
 	if !try_set(&port_state.sockets, socket, sock_state) {
 		SetLastError(ERROR_ALREADY_EXISTS)
 		free(sock_state)
+		poll_group_release(poll_group)
 		return nil
 	}
 	return sock_state
@@ -151,7 +178,6 @@ get_user_socket :: proc(port_state: ^Port_State, sock_state: ^Sock_State) -> SOC
 	for k, v in port_state.sockets {return k}
 	return INVALID_SOCKET
 }
-
 // Cancels a pending poll, removes from `sockets`, deletes, or puts on `delete_queue` if not `.Idle`
 sock_delete :: proc(port_state: ^Port_State, sock_state: ^Sock_State, force := false) -> int {
 	// TODO: get_user_socket can return invalid socket, improve this...
@@ -321,11 +347,6 @@ afd_cancel_poll :: proc(afd_device_handle: HANDLE, iosb: ^IO_STATUS_BLOCK) -> Er
 		return Errno(RtlNtStatusToDosError(cancel_status))
 	}
 }
-
-///////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////
 // Creates `afd_device` & associates to `iocp`
 afd_create_device :: proc(iocp: IOCP) -> Result(HANDLE, Errno) {
 	using win
@@ -358,8 +379,8 @@ afd_create_device :: proc(iocp: IOCP) -> Result(HANDLE, Errno) {
 	}
 	return afd_device
 }
-
-afd_poll :: proc(afd_device_handle: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO_STATUS_BLOCK) -> Errno {
+// calls `NtDeviceIoControlFile` on the `afd_device`
+afd_poll :: proc(afd_device: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO_STATUS_BLOCK) -> Errno {
 	using win
 	status: i32 // NTSTATUS
 	// Blocking operation is not supported.
@@ -367,7 +388,7 @@ afd_poll :: proc(afd_device_handle: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO
 
 	iosb.Status = win.STATUS_PENDING
 	status = NtDeviceIoControlFile(
-		afd_device_handle,
+		afd_device,
 		nil,
 		nil,
 		iosb,
@@ -387,9 +408,7 @@ afd_poll :: proc(afd_device_handle: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO
 		return Errno(RtlNtStatusToDosError(status))
 	}
 }
-
-//////////////////////////////////////////////
-
+// Allocates the `Set/[dynamic]T` needed and creates the `iocp`
 port_new :: proc(allocator := context.allocator) -> (port_state: ^Port_State, iocp: IOCP) {
 	using win
 	port_state = new(Port_State, allocator);assert(port_state != nil)
@@ -405,6 +424,7 @@ port_new :: proc(allocator := context.allocator) -> (port_state: ^Port_State, io
 port_delete :: proc(port_state: ^Port_State) -> Errno {
 	// At this point the IOCP port should have been closed.
 	assert(port_state.iocp == nil)
+	// This can fail if ctl is called, but not poll:
 	assert(set.is_empty(&port_state.update_queue))
 	assert(port_state.active_poll_count == 0)
 
@@ -422,7 +442,6 @@ port_delete :: proc(port_state: ^Port_State) -> Errno {
 
 	return STATUS_SUCCESS
 }
-
 // Closes IOCP Handle, sets to nil in port_state
 port_close :: proc(port_state: ^Port_State) -> Errno {
 	sync.guard(&port_state.lock)
@@ -516,6 +535,7 @@ port_wait :: proc(port_state: ^Port_State, events: ^Epoll_Event, maxevents: int,
 		return -1
 	}
 }
+// performs the Poll for each registered event
 port_poll :: proc(
 	port_state: ^Port_State,
 	epoll_events: [^]Epoll_Event,
@@ -524,13 +544,11 @@ port_poll :: proc(
 	timeout: u32 = INFINITE,
 ) -> int {
 	using win
-	completion_count: u32
-
 	if port_update_events(port_state) < 0 {return -1}
 
 	port_state.active_poll_count += 1
 	sync.unlock(&port_state.lock)
-
+	completion_count: u32
 	r := GetQueuedCompletionStatusEx(port_state.iocp, iocp_events, maxevents, &completion_count, timeout, false)
 
 	sync.lock(&port_state.lock)
@@ -541,7 +559,7 @@ port_poll :: proc(
 	return port_feed_events(port_state, epoll_events, iocp_events, completion_count)
 }
 // calls `sock_feed_event` on each iosb (Read Poll Results), returns #events
-port_feed_events :: #force_inline proc(
+port_feed_events :: proc(
 	port_state: ^Port_State,
 	epoll_events: [^]Epoll_Event,
 	iocp_events: [^]OVERLAPPED_ENTRY,
@@ -682,10 +700,7 @@ sock_feed_event :: proc(port_state: ^Port_State, io_status_block: ^IO_STATUS_BLO
 
 	epoll_events &= sock_state.user_events
 
-	if (epoll_events == 0) {
-		return 0
-	}
-
+	if (epoll_events == 0) {return 0}
 	if sock_state.user_events & EPOLL_ONESHOT != 0 {
 		sock_state.user_events = 0
 	}
