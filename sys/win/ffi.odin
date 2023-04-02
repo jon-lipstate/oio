@@ -27,7 +27,6 @@ foreign ws2_32 {
 
 //
 foreign import kernel32 "system:Kernel32.lib"
-
 @(default_calling_convention = "stdcall")
 foreign kernel32 {
 	SetFileCompletionNotificationModes :: proc(FileHandle: HANDLE, Flags: u8) -> BOOL ---
@@ -37,6 +36,9 @@ foreign kernel32 {
 	// <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-postqueuedcompletionstatus>
 	PostQueuedCompletionStatus :: proc(CompletionPort: HANDLE, dwNumberOfBytesTransferred: DWORD, dwCompletionKey: c.ulong, lpOverlapped: ^OVERLAPPED) -> BOOL ---
 	CreateEventA :: proc(lpEventAttributes: rawptr, bManualReset: BOOL, bInitialState: BOOL, lpName: ^cstring) -> HANDLE --- //LPSECURITY_ATTRIBUTES//LPCSTR
+	GetTickCount64 :: proc() -> u64 ---
+	// <https://github.com/mic101/windows/blob/master/WRK-v1.2/base/ntos/ex/keyedevent.c>
+	NtCreateKeyedEvent :: proc(KeyedEventHandle: ^HANDLE, DesiredAccess: ACCESS_MASK, ObjectAttributes: OBJECT_ATTRIBUTES, Flags: u32) -> NTSTATUS ---
 }
 SECURITY_QUALITY_OF_SERVICE :: struct {
 	Length:              DWORD,

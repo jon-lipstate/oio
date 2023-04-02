@@ -2,13 +2,19 @@ package oio
 
 import "core:sys/windows"
 import "./sys/win" //ffi bindings that are missing in core:sys/windows
+// Testing the server:
+// curl 127.0.0.1:3000
 
+// If port stuck open, from Admin cmd:
+// netstat -a -n -o | findstr :3000
+// taskkill /F /PID <PID>
 import "core:fmt"
 import "core:strings"
 import "core:c"
 import "core:net"
 import "core:math/bits"
 HANDLE :: windows.HANDLE
+SOCKET :: windows.SOCKET
 Errno :: win.Errno
 Result :: union($Value: typeid, $Error: typeid) {
 	Value,
@@ -38,7 +44,7 @@ associate_to_port :: proc(port: HANDLE, file_handle: HANDLE, ident: u32) -> Resu
 	return handle
 }
 
-main :: proc() {
+mainnn :: proc() {
 	// using win
 	addr := "127.0.0.1:3000"
 	ep, epok := net.parse_endpoint(addr)
@@ -61,40 +67,46 @@ main :: proc() {
 	}
 	poll_info := AFD_POLL_INFO {
 		NumberOfHandles = 1,
-		Timeout         = 1000, // 9223372036854775807,
+		Timeout         = 10_000_000, // 9223372036854775807,
 		Handles         = &events,
 	}
+	overlapped: windows.OVERLAPPED = {}
+
 	iosb := win.IO_STATUS_BLOCK{}
 	iosb.Status = win.STATUS_PENDING
-	overlapped := win.OVERLAPPED{}
 	fmt.println("overlapped", overlapped)
 	fmt.println("IOCTL_AFD_POLL", IOCTL_AFD_POLL)
 	fmt.println(poll_info)
 	fmt.println(iosb.Status)
-	status := win.NtDeviceIoControlFile(
-		afd,
-		nil,
-		nil,
-		&overlapped,
-		&iosb,
-		IOCTL_AFD_POLL,
-		&poll_info,
-		size_of(poll_info),
-		&poll_info,
-		size_of(poll_info),
-	)
+	// status := win.NtDeviceIoControlFile(
+	// 	afd,
+	// 	nil,
+	// 	nil,
+	// 	&overlapped,
+	// 	&iosb,
+	// 	IOCTL_AFD_POLL,
+	// 	&poll_info,
+	// 	size_of(poll_info),
+	// 	&poll_info,
+	// 	size_of(poll_info),
+	// )
+
+	bytes_returned := u32(0)
+	fmt.println("call DeviceIoControl")
+	status := windows.DeviceIoControl(afd, IOCTL_AFD_POLL, &poll_info, size_of(poll_info), nil, 0, &bytes_returned, &overlapped)
+
 	fmt.printf("status: 0x%X \n", transmute(u32)status)
 
-	if status != win.STATUS_PENDING {
-		raw_err := win.RtlNtStatusToDosError(status)
-		fmt.printf("Failed to poll AFD: 0x%X", u32(raw_err))
-		return
-	}
+	// if status != win.STATUS_PENDING {
+	// 	raw_err := win.RtlNtStatusToDosError(status)
+	// 	fmt.printf("Failed to poll AFD: 0x%X", u32(raw_err))
+	// 	return
+	// }
 	fmt.println("call get_queued_completion_status_ex")
 	completion_status: []OVERLAPPED_ENTRY
 	switch cs in get_queued_completion_status_ex(port, 1) {
 	case (Errno):
-		fmt.printf("Error: %v", cs)
+		fmt.printf("Error: 0x%X", cs)
 		return
 	case ([]OVERLAPPED_ENTRY):
 		completion_status = cs
@@ -114,6 +126,7 @@ AFD_POLL_INFO :: struct {
 	Unique:          bool, //BOOLEAN 
 	Handles:         ^AFD_POLL_HANDLE_INFO, //AFD_POLL_HANDLE_INFO Handles[1]
 }
+//https://stackoverflow.com/questions/73666936/data-transfer-manipulation-winsock2-ntdeviceiocontrolfile
 IOCTL_AFD_POLL :: 0x00012024
 //0001 1011 1001
 READER_FLAGS :: AFD_POLL_RECEIVE | AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_ACCEPT | AFD_POLL_CONNECT_FAIL
@@ -146,7 +159,7 @@ get_queued_completion_status_ex :: proc(port: HANDLE, count: int) -> Result([]OV
 	removed: u32 = 0
 	items := make([]OVERLAPPED_ENTRY, count)
 	entries := transmute([^]OVERLAPPED_ENTRY)raw_data(items)
-	ret := GetQueuedCompletionStatusEx(port, entries, u32(len(items)), &removed, INFINITE, false)
+	ret := GetQueuedCompletionStatusEx(port, entries, u32(len(items)), &removed, 10000, false)
 	if ret == false {
 		return Errno(GetLastError())
 	}
