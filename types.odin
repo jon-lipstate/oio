@@ -173,7 +173,7 @@ Port_State :: struct {
 	sockets:           map[SOCKET]^Sock_State, // sock_tree
 	update_queue:      Set(^Sock_State),
 	delete_queue:      [dynamic]^Sock_State,
-	group_queue:       [dynamic]^Poll_Group,
+	groups:            [dynamic]^Poll_Group,
 	//
 	lock:              sync.Mutex,
 	active_poll_count: int,
@@ -184,10 +184,8 @@ Sock_Poll_Status :: enum {
 	Cancelled,
 }
 Sock_State :: struct {
-	io_status_block: IO_STATUS_BLOCK, // Do NOT move from first position, used for casting upwards to Sock_State
+	io_status_block: IO_STATUS_BLOCK, // Do NOT move from first position, used for casting into `Sock_State`
 	poll_info:       AFD_POLL_INFO,
-	// queue_node:      Queue_Node,
-	// tree_node:       Tree_Node,
 	// parent:          ^Port_State, // new from me
 	poll_group:      ^Poll_Group,
 	base_socket:     SOCKET,
@@ -209,23 +207,11 @@ ws_global_init :: proc() {
 	version_requested := WORD(2) << 8 | 2
 	res := WSAStartup(version_requested, &unused_info)
 	assert(res == STATUS_SUCCESS)
+	fmt.println("WSA_Startup()")
 }
 // @(init, private)
 // nt_global_init :: proc() {
 // 	// ntdll = GetModuleHandleW(L"ntdll.dll")
-// }
-// reflock__keyed_event: HANDLE
-// @(init, private)
-// reflock_global_init :: proc() {
-// 	using win
-// 	status := NtCreateKeyedEvent(&reflock__keyed_event, KEYEDEVENT_ALL_ACCESS, nil, 0)
-// 	assert(status != STATUS_SUCCESS)
-// 	err := Errno(RtlNtStatusToDosError(status))
-// }
-// epoll__handle_tree: Ts_Tree
-// @(init, private)
-// epoll_global_init :: proc() {
-// 	ts_tree_init(&epoll__handle_tree)
 // }
 AFD_HELPER_NAME: [15]u16
 @(init, private)

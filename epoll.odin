@@ -28,8 +28,6 @@ main :: proc() {
 	evt.events = EPOLL_IN
 	evt.data.sock = sock
 	status := epoll_ctl(iocp, .Add, sock, evt)
-	fmt.println("status", status)
-	fmt.println("evt", evt)
 	i := 0
 	for {
 		fmt.print("Polling: ")
@@ -46,7 +44,7 @@ main :: proc() {
 IOCP :: HANDLE
 PORTS := map[IOCP]^Port_State{}
 /*
-Initializes a `Port_State` and `IOCP`, registers into `PORTS`, then returns `IOCP`
+Produces and registers an unbound `iocp` and its `Port_State`
 */
 epoll_create :: proc(allocator := context.allocator) -> IOCP {
 	port_state, iocp := port_new(allocator)
@@ -54,10 +52,7 @@ epoll_create :: proc(allocator := context.allocator) -> IOCP {
 	return iocp
 }
 /*
-The `epoll_ctl` function is responsible for managing the interest set of an epoll instance (represented by `iocp`).
-It is used to add, modify, or remove file descriptors from the interest set associated with the epoll instance.
-The interest set is the set of file descriptors that the epoll instance is monitoring for specific events.
-
+Performs Add, Mod, or Del ops on user-sockets  
 ~~ Register in Mio (Handle + Token)
 */
 epoll_ctl :: proc(iocp: IOCP, op: CTL_Action, sock: SOCKET, ev: ^Epoll_Event) -> int {
@@ -149,9 +144,9 @@ sock_new :: proc(port_state: ^Port_State, socket: SOCKET, allocator := context.a
 	sock_state.base_socket = base_socket
 	sock_state.poll_group = poll_group
 	// sock_state.parent = port_state
-
 	// port_register_socket
 	if !try_set(&port_state.sockets, socket, sock_state) {
+		if true do panic("shouldnt happen?")
 		SetLastError(ERROR_ALREADY_EXISTS)
 		free(sock_state)
 		poll_group_release(poll_group)
@@ -162,7 +157,6 @@ sock_new :: proc(port_state: ^Port_State, socket: SOCKET, allocator := context.a
 // registers `event` into `sock_state`, then places `sock_state` into `update_queue`
 sock_set_event :: proc(port_state: ^Port_State, sock_state: ^Sock_State, ev: ^Epoll_Event) -> int {
 	events: u32 = ev.events | u32(EPOLL_ERR | EPOLL_HUP)
-
 	sock_state.user_events = events
 	sock_state.user_data = ev.data
 
@@ -278,13 +272,14 @@ check_handle :: proc(h: HANDLE) -> Errno {
 	}
 	return 0
 }
+// LOCKING  
 // Either gets existing poll_group, or makes a new one
 poll_group_acquire :: proc(port_state: ^Port_State, allocator := context.allocator) -> ^Poll_Group {
 	sync.guard(&port_state.lock)
-	group_queue := &port_state.group_queue
+	groups := &port_state.groups
 	// Check if there is an existing Poll_Group in the queue
-	if len(group_queue) != 0 {
-		last_pg := group_queue[len(group_queue) - 1]
+	if len(groups) != 0 {
+		last_pg := groups[len(groups) - 1]
 		// If the existing Poll_Group has not reached the maximum group size, return it
 		if last_pg.group_size < POLL_GROUP_MAX_GROUP_SIZE {
 			last_pg.group_size += 1
@@ -292,22 +287,20 @@ poll_group_acquire :: proc(port_state: ^Port_State, allocator := context.allocat
 		}
 	}
 	// Create a new Poll_Group and add it to the queue
-	new_pg, alloc_err := new(Poll_Group, allocator);assert(alloc_err == .None)
-	new_pg.port_state = port_state
-	new_pg.group_size = 1
-	append(group_queue, new_pg)
+	poll_group := poll_group_new(port_state, allocator);assert(poll_group != nil)
 	// TODO: not sure i understand the move_to_start bit in wepoll
-	return new_pg
+	return poll_group
 }
 // Decrements `poll_group.group_size`, moves `poll_group` to back of queue
 poll_group_release :: proc(poll_group: ^Poll_Group) {
-	group_queue := &poll_group.port_state.group_queue
+	groups := &poll_group.port_state.groups
 	poll_group.group_size -= 1
+	assert(poll_group.group_size >= 0)
 	assert(poll_group.group_size < POLL_GROUP_MAX_GROUP_SIZE)
-	idx := index_of(group_queue[:], poll_group);assert(idx >= 0)
-	if idx < len(group_queue) - 1 {
-		ordered_remove(group_queue, idx)
-		append(group_queue, poll_group)
+	idx := index_of(groups[:], poll_group);assert(idx >= 0)
+	if idx < len(groups) - 1 {
+		ordered_remove(groups, idx)
+		append(groups, poll_group)
 	}
 	// Poll groups are currently only freed when the epoll port is closed.
 }
@@ -334,9 +327,7 @@ cancel_socket_update :: proc(port_state: ^Port_State, sock_state: ^Sock_State) {
 afd_cancel_poll :: proc(afd_device_handle: HANDLE, iosb: ^IO_STATUS_BLOCK) -> Errno {
 	using win
 	// If the poll operation has already completed or has been cancelled earlier, there's nothing left for us to do.
-	if iosb.Status != STATUS_PENDING {
-		return STATUS_SUCCESS
-	}
+	if iosb.Status != STATUS_PENDING {return STATUS_SUCCESS}
 	cancel_iosb: IO_STATUS_BLOCK
 	cancel_status := NtCancelIoFileEx(afd_device_handle, iosb, &cancel_iosb)
 	// NtCancelIoFileEx() may return STATUS_NOT_FOUND if the operation completed just before calling NtCancelIoFileEx().
@@ -367,6 +358,7 @@ afd_create_device :: proc(iocp: IOCP) -> Result(HANDLE, Errno) {
 	)
 	if status != STATUS_SUCCESS {
 		err: u32 = RtlNtStatusToDosError(status)
+		SetLastError(err)
 		return Errno(err)
 	}
 	// associate handle
@@ -382,12 +374,10 @@ afd_create_device :: proc(iocp: IOCP) -> Result(HANDLE, Errno) {
 // calls `NtDeviceIoControlFile` on the `afd_device`
 afd_poll :: proc(afd_device: HANDLE, poll_info: ^AFD_POLL_INFO, iosb: ^IO_STATUS_BLOCK) -> Errno {
 	using win
-	status: i32 // NTSTATUS
-	// Blocking operation is not supported.
-	assert(iosb != nil)
+	assert(iosb != nil) // Blocking operation is not supported.
 
 	iosb.Status = win.STATUS_PENDING
-	status = NtDeviceIoControlFile(
+	status := NtDeviceIoControlFile(
 		afd_device,
 		nil,
 		nil,
@@ -416,7 +406,7 @@ port_new :: proc(allocator := context.allocator) -> (port_state: ^Port_State, io
 	port_state.iocp = iocp
 	port_state.update_queue = set.init(^Sock_State, allocator)
 	port_state.delete_queue = make([dynamic]^Sock_State, allocator)
-	port_state.group_queue = make([dynamic]^Poll_Group, allocator)
+	port_state.groups = make([dynamic]^Poll_Group, allocator)
 
 	return port_state, iocp
 }
@@ -424,20 +414,17 @@ port_new :: proc(allocator := context.allocator) -> (port_state: ^Port_State, io
 port_delete :: proc(port_state: ^Port_State) -> Errno {
 	// At this point the IOCP port should have been closed.
 	assert(port_state.iocp == nil)
-	// This can fail if ctl is called, but not poll:
-	assert(set.is_empty(&port_state.update_queue))
 	assert(port_state.active_poll_count == 0)
 
-	for ss in &port_state.delete_queue {
+	for _, ss in &port_state.sockets {
 		sock_delete(port_state, ss, true)
 	}
-
-	for pg in &port_state.group_queue {
+	for pg in &port_state.groups {
 		poll_group_delete(pg)
 	}
 	set.destroy(&port_state.update_queue)
 	delete(port_state.delete_queue)
-	delete(port_state.group_queue)
+	delete(port_state.groups)
 	free(port_state)
 
 	return STATUS_SUCCESS
@@ -464,7 +451,7 @@ poll_group_new :: proc(port_state: ^Port_State, allocator := context.allocator) 
 		free(poll_group)
 		return nil
 	}
-	append(&port_state.group_queue, poll_group)
+	append(&port_state.groups, poll_group)
 	return poll_group
 }
 // `CloseHandle(afd)`, `free(self)`
@@ -554,7 +541,7 @@ port_poll :: proc(
 	sync.lock(&port_state.lock)
 	port_state.active_poll_count -= 1
 
-	if !r {return -1}
+	if !r {return -1} 	// TODO: map_error()
 
 	return port_feed_events(port_state, epoll_events, iocp_events, completion_count)
 }
@@ -646,7 +633,7 @@ sock_update :: proc(port_state: ^Port_State, sock_state: ^Sock_State) -> int {
 		sock_state.poll_info.Handles[0].Status = 0
 		sock_state.poll_info.Handles[0].PollEvents = epoll_events_into_afd_events(sock_state.user_events)
 
-		if (afd_poll(sock_state.poll_group.afd_device, &sock_state.poll_info, &sock_state.io_status_block) < 0) {
+		if afd_poll(sock_state.poll_group.afd_device, &sock_state.poll_info, &sock_state.io_status_block) < 0 {
 			switch (GetLastError()) {
 			case ERROR_IO_PENDING:
 				/* Overlapped poll operation in progress; this is expected. */
